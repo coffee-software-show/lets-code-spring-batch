@@ -22,9 +22,11 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ImportRuntimeHints;
 import org.springframework.core.DecoratingProxy;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 
-import java.util.UUID;
+import javax.sql.DataSource;
+import java.util.Date;
 
 @SpringBootApplication
 @ImportRuntimeHints(BatchApplication.Hints.class)
@@ -44,10 +46,17 @@ public class BatchApplication {
     }
 
     @Bean
+    Job job(JobRepository jobRepository, Step step) {
+        return new JobBuilder("job", jobRepository)
+                .start(step) //
+                .build();
+    }
+
+    @Bean
     ApplicationRunner runner(JobLauncher jobLauncher, Job job) {
         return args -> {
             var jobParameters = new JobParametersBuilder()
-                    .addString("uuid", UUID.randomUUID().toString())
+                    .addDate("date", new Date())
                     .toJobParameters();
             var run = jobLauncher.run(job, jobParameters);
             var instanceId = run.getJobInstance().getInstanceId();
@@ -57,25 +66,24 @@ public class BatchApplication {
 
     @Bean
     @StepScope
-    Tasklet tasklet(@Value("#{jobParameters['uuid']}") String uuid) {
+    Tasklet tasklet(@Value("#{jobParameters['date']}") Date date ) {
         return (contribution, context) -> {
-            System.out.println("hello, world! the UUID is " + uuid);
+            System.out.println("hello, world! the date is " + date );
             return RepeatStatus.FINISHED;
         };
     }
 
     @Bean
-    Job job(JobRepository jobRepository, Step step) {
-        return new JobBuilder("job", jobRepository)
-                .start(step) //
-                .build();
+    JdbcTemplate template(DataSource dataSource) {
+        return new JdbcTemplate(dataSource);
     }
 
     @Bean
-    Step step1(JobRepository jobRepository, Tasklet tasklet, PlatformTransactionManager transactionManager) {
+    Step step(JobRepository jobRepository, Tasklet tasklet, PlatformTransactionManager transactionManager) {
         return new StepBuilder("step1", jobRepository) //
                 .tasklet(tasklet, transactionManager) //
                 .build();
     }
 }
+
 

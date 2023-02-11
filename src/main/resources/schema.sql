@@ -1,1 +1,4 @@
-create table coffee
+create table noop
+(
+    id serial primary key
+);
