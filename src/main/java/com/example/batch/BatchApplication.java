@@ -63,52 +63,6 @@ public class BatchApplication {
 }
 
 @Configuration
-class YearPlatformReportStepConfiguration {
-
-    private final JobRepository repository;
-    private final JdbcTemplate jdbc;
-    private final PlatformTransactionManager transactionManager;
-    private final TransactionTemplate tx;
-
-    YearPlatformReportStepConfiguration(JobRepository repository, JdbcTemplate jdbc, PlatformTransactionManager transactionManager, TransactionTemplate tx) {
-        this.repository = repository;
-        this.jdbc = jdbc;
-        this.transactionManager = transactionManager;
-        this.tx = tx;
-    }
-
-    @Bean
-    Step yearPlatformReportStep() {
-        return new StepBuilder("yearPlatformReportStep", repository)//
-                .tasklet((contribution, chunkContext) ->//
-                        tx.execute(status -> {
-                            jdbc.execute(
-                                    """
-                                                insert into year_platform_report (year, platform)
-                                                select year, platform from video_game_sales
-                                                on conflict on constraint year_platform_report_year_platform_key do nothing;
-                                            """);
-                            jdbc.execute("""
-                                    insert into year_platform_report (year, platform, sales)
-                                    select yp1.year,
-                                           yp1.platform, (
-                                                select sum(vgs.global_sales) from video_game_sales vgs
-                                                where vgs.platform = yp1.platform and vgs.year = yp1.year
-                                            )
-                                    from year_platform_report as yp1
-                                    on conflict on constraint year_platform_report_year_platform_key
-                                     do update set 
-                                                year = excluded.year,
-                                            platform = excluded.platform,
-                                               sales = excluded.sales;
-                                    """);
-                            return RepeatStatus.FINISHED;
-                        }), transactionManager)//
-                .build();
-    }
-}
-
-@Configuration
 class CsvToDbStepConfiguration {
 
     private final DataSource dataSource;
@@ -119,7 +73,7 @@ class CsvToDbStepConfiguration {
     CsvToDbStepConfiguration(
             @Value("file:///${HOME}/Desktop/batch/data/vgsales.csv") Resource resource,
             DataSource dataSource, JobRepository repository,
-            PlatformTransactionManager txm) throws Exception {
+            PlatformTransactionManager txm) {
         this.dataSource = dataSource;
         this.repository = repository;
         this.resource = resource;
@@ -229,10 +183,55 @@ class CsvToDbStepConfiguration {
                 .build();
     }
 
-
     private static int parseInt(String text) {
         if (text != null && !text.contains("NA") && !text.contains("N/A")) return Integer.parseInt(text);
         return 0;
     }
 
+}
+
+@Configuration
+class YearPlatformReportStepConfiguration {
+
+    private final JobRepository repository;
+    private final JdbcTemplate jdbc;
+    private final PlatformTransactionManager transactionManager;
+    private final TransactionTemplate tx;
+
+    YearPlatformReportStepConfiguration(JobRepository repository, JdbcTemplate jdbc, PlatformTransactionManager transactionManager, TransactionTemplate tx) {
+        this.repository = repository;
+        this.jdbc = jdbc;
+        this.transactionManager = transactionManager;
+        this.tx = tx;
+    }
+
+    @Bean
+    Step yearPlatformReportStep() {
+        return new StepBuilder("yearPlatformReportStep", repository)//
+                .tasklet((contribution, chunkContext) ->//
+                        tx.execute(status -> {
+                            jdbc.execute(
+                                    """
+                                                insert into year_platform_report (year, platform)
+                                                select year, platform from video_game_sales
+                                                on conflict on constraint year_platform_report_year_platform_key do nothing;
+                                            """);
+                            jdbc.execute("""
+                                    insert into year_platform_report (year, platform, sales)
+                                    select yp1.year,
+                                           yp1.platform, (
+                                                select sum(vgs.global_sales) from video_game_sales vgs
+                                                where vgs.platform = yp1.platform and vgs.year = yp1.year
+                                            )
+                                    from year_platform_report as yp1
+                                    on conflict on constraint year_platform_report_year_platform_key
+                                     do update set 
+                                                year = excluded.year,
+                                            platform = excluded.platform,
+                                               sales = excluded.sales;
+                                    """);
+                            return RepeatStatus.FINISHED;
+                        }), transactionManager)//
+                .build();
+    }
 }
