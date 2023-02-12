@@ -15,3 +15,12 @@ create table if not exists video_game_sales
     unique (name, platform, year, genre)
 
 );
+
+drop table if exists year_platform_report;
+create table if not exists year_platform_report
+(
+    year     int,
+    platform text,
+    sales    numeric(8, 2),
+    unique (year, platform)
+);
