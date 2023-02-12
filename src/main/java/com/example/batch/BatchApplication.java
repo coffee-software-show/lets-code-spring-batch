@@ -4,8 +4,7 @@ import org.springframework.aop.SpringProxy;
 import org.springframework.aop.framework.Advised;
 import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
-import org.springframework.batch.core.Job;
-import org.springframework.batch.core.Step;
+import org.springframework.batch.core.*;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.launch.JobOperator;
@@ -33,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 @SpringBootApplication
 @ImportRuntimeHints(BatchApplication.Hints.class)
@@ -51,16 +51,61 @@ public class BatchApplication {
         SpringApplication.run(BatchApplication.class, args);
     }
 
+
+    public static final String EMPTY_STATUS = "EMPTY";
+
+
     @Bean
-    Job job(JobRepository jobRepository, CsvToDbStepConfiguration csvToDbStepConfiguration,
-            YearPlatformReportStepConfiguration yearPlatformReportStepConfiguration) throws Exception {
+    Step end(JobRepository repository, PlatformTransactionManager tx) {
+        return new StepBuilder("end", repository)
+                .tasklet((contribution, chunkContext) -> {
+                    System.out.println("the job is finished");
+                    return RepeatStatus.FINISHED;
+                }, tx)
+                .build();
+    }
+
+    @Bean
+    Job job(
+            JobRepository jobRepository,
+            ErrorStepConfiguration errorStepConfiguration,
+            CsvToDbStepConfiguration csvToDbStepConfiguration,
+            YearPlatformReportStepConfiguration yearPlatformReportStepConfiguration,
+            Step end) {
+        var gameByYearStep = csvToDbStepConfiguration.gameByYearStep();
         return new JobBuilder("job", jobRepository)//
                 .incrementer(new RunIdIncrementer())//
-                .start(csvToDbStepConfiguration.gameByYearStep()) //
-                .next(yearPlatformReportStepConfiguration.yearPlatformReportStep()) //
+                .start(gameByYearStep).on(EMPTY_STATUS).to(errorStepConfiguration.errorStep())  //
+                .from(gameByYearStep).on("*").to(yearPlatformReportStepConfiguration.yearPlatformReportStep()) //
+                .next(end)
+                .build() //
+                .build();
+
+    }
+}
+
+@Configuration
+class ErrorStepConfiguration {
+
+    private final JobRepository repository;
+    private final PlatformTransactionManager tx;
+
+    ErrorStepConfiguration(JobRepository repository, PlatformTransactionManager tx) {
+        this.repository = repository;
+        this.tx = tx;
+    }
+
+    @Bean
+    Step errorStep() {
+        return new StepBuilder("errorStep", repository)
+                .tasklet((contribution, chunkContext) -> {
+                    System.out.println("oops!");
+                    return RepeatStatus.FINISHED;
+                }, tx)
                 .build();
     }
 }
+
 
 @Configuration
 class CsvToDbStepConfiguration {
@@ -69,15 +114,17 @@ class CsvToDbStepConfiguration {
     private final Resource resource;
     private final JobRepository repository;
     private final PlatformTransactionManager tx;
+    private final JdbcTemplate jdbc;
 
     CsvToDbStepConfiguration(
             @Value("file:///${HOME}/Desktop/batch/data/vgsales.csv") Resource resource,
             DataSource dataSource, JobRepository repository,
-            PlatformTransactionManager txm) {
+            PlatformTransactionManager txm, JdbcTemplate template) {
         this.dataSource = dataSource;
         this.repository = repository;
         this.resource = resource;
         this.tx = txm;
+        this.jdbc = template;
     }
 
     record GameByYear(int rank, String name, String platform, int year, String genre, String publisher, float na,
@@ -180,6 +227,15 @@ class CsvToDbStepConfiguration {
                 .<GameByYear, GameByYear>chunk(100, tx)//
                 .reader(gameByYearReader())//
                 .writer(gameByYearWriter())//
+                .listener(new StepExecutionListener() {
+                    @Override
+                    public ExitStatus afterStep(StepExecution stepExecution) {
+                        var count = Objects.requireNonNull(jdbc.queryForObject("select coalesce(count(*) ,0) from video_game_sales", Integer.class));
+                        var status = count == 0 ? new ExitStatus(BatchApplication.EMPTY_STATUS) : ExitStatus.COMPLETED;
+                        System.out.println("the status is " + status);
+                        return status;
+                    }
+                })
                 .build();
     }
 
