@@ -52,11 +52,41 @@ public class BatchApplication {
     }
 
 
-    public static final String EMPTY_STATUS = "EMPTY";
+    public static final String EMPTY_CSV_STATUS = "EMPTY";
 
 
     @Bean
-    Step end(JobRepository repository, PlatformTransactionManager tx) {
+    Job job(
+            JobRepository jobRepository,
+            ErrorStepConfiguration errorStepConfiguration,
+            CsvToDbStepConfiguration csvToDbStepConfiguration,
+            YearPlatformReportStepConfiguration yearPlatformReportStepConfiguration,
+            EndStepConfiguration endStepConfiguration ) {
+        var gameByYearStep = csvToDbStepConfiguration.gameByYearStep();
+        return new JobBuilder("job", jobRepository)//
+                .incrementer(new RunIdIncrementer())//
+                .start(gameByYearStep).on(EMPTY_CSV_STATUS).to(errorStepConfiguration.errorStep())  //
+                .from(gameByYearStep).on("*").to(yearPlatformReportStepConfiguration.yearPlatformReportStep()) //
+                .next(endStepConfiguration.end()) //
+                .build() //
+                .build();
+
+    }
+}
+
+@Configuration
+class EndStepConfiguration {
+
+    private final JobRepository repository;
+    private final PlatformTransactionManager tx;
+
+    EndStepConfiguration(JobRepository repository, PlatformTransactionManager tx) {
+        this.repository = repository;
+        this.tx = tx;
+    }
+
+    @Bean
+    Step end() {
         return new StepBuilder("end", repository)
                 .tasklet((contribution, chunkContext) -> {
                     System.out.println("the job is finished");
@@ -65,23 +95,7 @@ public class BatchApplication {
                 .build();
     }
 
-    @Bean
-    Job job(
-            JobRepository jobRepository,
-            ErrorStepConfiguration errorStepConfiguration,
-            CsvToDbStepConfiguration csvToDbStepConfiguration,
-            YearPlatformReportStepConfiguration yearPlatformReportStepConfiguration,
-            Step end) {
-        var gameByYearStep = csvToDbStepConfiguration.gameByYearStep();
-        return new JobBuilder("job", jobRepository)//
-                .incrementer(new RunIdIncrementer())//
-                .start(gameByYearStep).on(EMPTY_STATUS).to(errorStepConfiguration.errorStep())  //
-                .from(gameByYearStep).on("*").to(yearPlatformReportStepConfiguration.yearPlatformReportStep()) //
-                .next(end)
-                .build() //
-                .build();
 
-    }
 }
 
 @Configuration
@@ -136,7 +150,7 @@ class CsvToDbStepConfiguration {
     FlatFileItemReader<GameByYear> gameByYearReader() {
         return new FlatFileItemReaderBuilder<GameByYear>()//
                 .resource(resource)//
-                .name("csvFFIR")//
+                .name("gameByYearReader")//
                 .delimited().delimiter(",")//
                 .names("rank,name,platform,year,genre,publisher,na,eu,jp,other,global".split(",")) //
                 .linesToSkip(1)//
@@ -230,8 +244,9 @@ class CsvToDbStepConfiguration {
                 .listener(new StepExecutionListener() {
                     @Override
                     public ExitStatus afterStep(StepExecution stepExecution) {
-                        var count = Objects.requireNonNull(jdbc.queryForObject("select coalesce(count(*) ,0) from video_game_sales", Integer.class));
-                        var status = count == 0 ? new ExitStatus(BatchApplication.EMPTY_STATUS) : ExitStatus.COMPLETED;
+                        var count = Objects.requireNonNull(
+                                jdbc.queryForObject("select coalesce(count(*) ,0) from video_game_sales", Integer.class));
+                        var status = count == 0 ? new ExitStatus(BatchApplication.EMPTY_CSV_STATUS) : ExitStatus.COMPLETED;
                         System.out.println("the status is " + status);
                         return status;
                     }
