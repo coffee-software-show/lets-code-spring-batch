@@ -11,8 +11,10 @@ import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
+import org.springframework.batch.item.database.builder.JdbcCursorItemReaderBuilder;
 import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
 import org.springframework.batch.repeat.RepeatStatus;
@@ -25,14 +27,14 @@ import org.springframework.context.annotation.ImportRuntimeHints;
 import org.springframework.core.DecoratingProxy;
 import org.springframework.core.io.Resource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @SpringBootApplication
 @ImportRuntimeHints(BatchApplication.Hints.class)
@@ -61,18 +63,87 @@ public class BatchApplication {
             ErrorStepConfiguration errorStepConfiguration,
             CsvToDbStepConfiguration csvToDbStepConfiguration,
             YearPlatformReportStepConfiguration yearPlatformReportStepConfiguration,
-            EndStepConfiguration endStepConfiguration ) {
+            YearReportStepConfiguration yearReportStepConfiguration,
+            EndStepConfiguration endStepConfiguration) {
         var gameByYearStep = csvToDbStepConfiguration.gameByYearStep();
         return new JobBuilder("job", jobRepository)//
                 .incrementer(new RunIdIncrementer())//
                 .start(gameByYearStep).on(EMPTY_CSV_STATUS).to(errorStepConfiguration.errorStep())  //
                 .from(gameByYearStep).on("*").to(yearPlatformReportStepConfiguration.yearPlatformReportStep()) //
+                .next(yearReportStepConfiguration.yearReportStep())
                 .next(endStepConfiguration.end()) //
                 .build() //
                 .build();
 
     }
 }
+
+record YearPlatformSales(int year, String platform, float sales) {
+}
+
+record YearReport(int year, Collection<YearPlatformSales> breakout) {
+}
+
+@Configuration
+class YearReportStepConfiguration {
+
+    private final Map<Integer, YearReport> reportMap = new ConcurrentHashMap<>();
+    private final DataSource dataSource;
+    private final JobRepository repository;
+    private final PlatformTransactionManager transactionManager;
+
+
+    YearReportStepConfiguration(JobRepository repository, DataSource dataSource, PlatformTransactionManager transactionManager) {
+        this.dataSource = dataSource;
+        this.repository = repository;
+        this.transactionManager = transactionManager;
+    }
+
+    private final RowMapper<YearReport> rowMapper = (rs, rowNum) -> {
+        var year = rs.getInt("year");
+        if (!this.reportMap.containsKey(year)) this.reportMap.put(year, new YearReport(year, new ArrayList<>()));
+        var yr = this.reportMap.get(year);
+        yr.breakout().add(new YearPlatformSales(rs.getInt("year"), rs.getString("platform"), rs.getFloat("sales")));
+        return yr;
+    };
+
+    @Bean
+    ItemReader<YearReport> yearPlatformSalesItemReader() {
+        var sql = """
+                select year   ,
+                       ypr.platform,
+                       ypr.sales,
+                       (select count(yps.year) from year_platform_report yps where yps.year = ypr.year ) 
+                from year_platform_report ypr
+                where ypr.year != 0
+                order by year
+                """;
+        return new JdbcCursorItemReaderBuilder<YearReport>()
+                .sql(sql)
+                .name("yearPlatformSalesItemReader")
+                .dataSource(this.dataSource)
+                .rowMapper(this.rowMapper)
+                .build();
+
+    }
+
+    //todo make sure we dedupe the data being written before it's been sent out.
+    //
+    @Bean
+    Step yearReportStep() {
+        return new StepBuilder("yearReportStep", repository)
+                .<YearReport, YearReport>chunk(1000, this.transactionManager)
+                .reader(yearPlatformSalesItemReader())
+                .writer(chunk -> {
+                    var set = new LinkedHashSet<YearReport>();
+                    set.addAll(chunk.getItems());
+                    System.out.println("---------");
+                    set.forEach(r -> System.out.println(r.toString()));
+                })
+                .build();
+    }
+}
+
 
 @Configuration
 class EndStepConfiguration {
@@ -119,7 +190,6 @@ class ErrorStepConfiguration {
                 .build();
     }
 }
-
 
 @Configuration
 class CsvToDbStepConfiguration {
@@ -232,7 +302,8 @@ class CsvToDbStepConfiguration {
                             "global_sales", item.global()//
                     ));
                     return new MapSqlParameterSource(map);
-                }).build();
+                }) //
+                .build();
     }
 
     @Bean
