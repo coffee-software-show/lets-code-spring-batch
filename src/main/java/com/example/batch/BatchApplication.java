@@ -195,6 +195,8 @@ class YearReportStepConfiguration {
         return MessageChannels.queue().get();
     }
 
+    // todo create a proxy using ProxyFactoryBean to wrap this bean and
+    //  dedupe the Chunk<String> that's being sent out
     @Bean
     @StepScope
     ChunkMessageChannelItemWriter<String> chunkMessageChannelItemWriter() {
