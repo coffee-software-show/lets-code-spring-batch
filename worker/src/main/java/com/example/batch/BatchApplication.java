@@ -72,6 +72,12 @@ class WorkerConfiguration {
         }
     }
 
+    private static void doSomethingTimeIntensive(YearReport yearReport) {
+        System.out.println("====================");
+        System.out.println("got yearReport");
+        System.out.println(yearReport.toString());
+    }
+
     @Bean
     @ServiceActivator(inputChannel = "requests", outputChannel = "replies", sendTimeout = "10000")
     ChunkProcessorChunkHandler<String> chunkProcessorChunkHandler() {
@@ -91,7 +97,8 @@ class WorkerConfiguration {
 
     @Bean
     ItemWriter<YearReport> writer() {
-        return chunk -> chunk.getItems().forEach(System.out::println);
+        return chunk -> chunk.getItems()
+                .forEach(WorkerConfiguration::doSomethingTimeIntensive);
     }
 }
 

@@ -18,6 +18,7 @@ import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.core.step.tasklet.TaskletStep;
 import org.springframework.batch.integration.chunk.ChunkMessageChannelItemWriter;
 import org.springframework.batch.integration.chunk.RemoteChunkHandlerFactoryBean;
+import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
@@ -69,9 +70,7 @@ public class BatchApplication {
         SpringApplication.run(BatchApplication.class, args);
     }
 
-
     public static final String EMPTY_CSV_STATUS = "EMPTY";
-
 
     @Bean
     Job job(
@@ -156,19 +155,13 @@ class YearReportStepConfiguration {
 
     }
 
-    //todo make sure we dedupe the data being written before it's been sent out.
     @Bean
     TaskletStep yearReportStep() {
         return new StepBuilder("yearReportStep", repository)
                 .<YearReport, String>chunk(1000, this.transactionManager)
                 .reader(yearPlatformSalesItemReader())
                 .processor(objectMapper::writeValueAsString)
-                .writer(chunkMessageChannelItemWriter()/*chunk -> {
-                    var set = new LinkedHashSet<YearReport>();
-                    set.addAll(chunk.getItems());
-                    System.out.println("---------");
-                    set.forEach(r -> System.out.println(r.toString()));
-                }*/)
+                .writer(chunkMessageChannelItemWriter() )
                 .build();
     }
 
@@ -190,21 +183,31 @@ class YearReportStepConfiguration {
         return MessageChannels.queue().get();
     }
 
-    // todo create a proxy using ProxyFactoryBean to wrap this bean and
-    //  dedupe the Chunk<String> that's being sent out
+    static class DedupingChunkMessageChannelItemWriter<T> extends ChunkMessageChannelItemWriter<T> {
+
+        @Override
+        public void write(Chunk<? extends T> items) throws Exception {
+            var inputCollection = items.getItems();
+            var newList = new ArrayList<T>(new LinkedHashSet<>(inputCollection));
+            super.write(new Chunk<T>(newList));
+        }
+    }
+
+
     @Bean
     @StepScope
     ChunkMessageChannelItemWriter<String> chunkMessageChannelItemWriter() {
-        var chunkMessageChannelItemWriter = new ChunkMessageChannelItemWriter<String>();
+        var chunkMessageChannelItemWriter = new DedupingChunkMessageChannelItemWriter<String>();
         chunkMessageChannelItemWriter.setMessagingOperations(messagingTemplate());
         chunkMessageChannelItemWriter.setReplyChannel(replies());
         return chunkMessageChannelItemWriter;
     }
 
     @Bean
-    RemoteChunkHandlerFactoryBean<String> chunkHandler() {
+    RemoteChunkHandlerFactoryBean<String> chunkHandler() throws Exception {
+        var chunkMessageChannelItemWriterProxy = (chunkMessageChannelItemWriter());
         var remoteChunkHandlerFactoryBean = new RemoteChunkHandlerFactoryBean<String>();
-        remoteChunkHandlerFactoryBean.setChunkWriter(chunkMessageChannelItemWriter());
+        remoteChunkHandlerFactoryBean.setChunkWriter(chunkMessageChannelItemWriterProxy);
         remoteChunkHandlerFactoryBean.setStep(this.yearReportStep());
         return remoteChunkHandlerFactoryBean;
     }
