@@ -18,7 +18,6 @@ import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.core.step.tasklet.TaskletStep;
 import org.springframework.batch.integration.chunk.ChunkMessageChannelItemWriter;
 import org.springframework.batch.integration.chunk.RemoteChunkHandlerFactoryBean;
-import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
@@ -66,6 +65,7 @@ public class BatchApplication {
     }
 
     public static void main(String[] args) {
+        System.setProperty("csvFile", "file:///Users/jlong/Desktop/lets-code-spring-batch/data/vgsales.csv");
         SpringApplication.run(BatchApplication.class, args);
     }
 
@@ -162,12 +162,7 @@ class YearReportStepConfiguration {
         return new StepBuilder("yearReportStep", repository)
                 .<YearReport, String>chunk(1000, this.transactionManager)
                 .reader(yearPlatformSalesItemReader())
-                .processor(new ItemProcessor<YearReport, String>() {
-                    @Override
-                    public String process(YearReport item) throws Exception {
-                        return objectMapper.writeValueAsString(item);
-                    }
-                })
+                .processor(objectMapper::writeValueAsString)
                 .writer(chunkMessageChannelItemWriter()/*chunk -> {
                     var set = new LinkedHashSet<YearReport>();
                     set.addAll(chunk.getItems());
@@ -326,7 +321,7 @@ class CsvToDbStepConfiguration {
     private final JdbcTemplate jdbc;
 
     CsvToDbStepConfiguration(
-            @Value("file:///${HOME}/Desktop/batch/data/vgsales.csv") Resource resource,
+            @Value("${csvFile}") Resource resource,
             DataSource dataSource, JobRepository repository,
             PlatformTransactionManager txm, JdbcTemplate template) {
         this.dataSource = dataSource;
