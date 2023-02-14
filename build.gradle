@@ -14,7 +14,12 @@ repositories {
 }
 
 dependencies {
+	implementation 'org.springframework.batch:spring-batch-integration'
+	implementation 'org.springframework.integration:spring-integration-amqp'
+	implementation 'org.springframework.boot:spring-boot-starter-integration'
 	implementation 'org.springframework.boot:spring-boot-starter-batch'
+	implementation 'org.springframework.boot:spring-boot-starter-amqp'
+	implementation 'org.springframework.boot:spring-boot-starter-json'
 	implementation 'org.springframework.boot:spring-boot-starter-jdbc'
 	implementation 'org.postgresql:postgresql'
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'

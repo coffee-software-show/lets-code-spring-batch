@@ -1,5 +1,9 @@
 package com.example.batch;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.aop.SpringProxy;
 import org.springframework.aop.framework.Advised;
 import org.springframework.aot.hint.RuntimeHints;
@@ -11,6 +15,10 @@ import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.core.step.tasklet.TaskletStep;
+import org.springframework.batch.integration.chunk.ChunkMessageChannelItemWriter;
+import org.springframework.batch.integration.chunk.RemoteChunkHandlerFactoryBean;
+import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
@@ -21,11 +29,19 @@ import org.springframework.batch.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.batch.JobExecutionEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportRuntimeHints;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.DecoratingProxy;
 import org.springframework.core.io.Resource;
+import org.springframework.integration.amqp.dsl.Amqp;
+import org.springframework.integration.channel.DirectChannel;
+import org.springframework.integration.channel.QueueChannel;
+import org.springframework.integration.core.MessagingTemplate;
+import org.springframework.integration.dsl.IntegrationFlow;
+import org.springframework.integration.dsl.MessageChannels;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -87,21 +103,34 @@ record YearReport(int year, Collection<YearPlatformSales> breakout) {
 @Configuration
 class YearReportStepConfiguration {
 
+    // todo: clear this out after the job is done. some sort of listener?
     private final Map<Integer, YearReport> reportMap = new ConcurrentHashMap<>();
     private final DataSource dataSource;
     private final JobRepository repository;
     private final PlatformTransactionManager transactionManager;
+    private final ObjectMapper objectMapper;
 
-
-    YearReportStepConfiguration(JobRepository repository, DataSource dataSource, PlatformTransactionManager transactionManager) {
+    YearReportStepConfiguration(JobRepository repository, DataSource dataSource, PlatformTransactionManager transactionManager, ObjectMapper objectMapper) {
         this.dataSource = dataSource;
         this.repository = repository;
         this.transactionManager = transactionManager;
+        this.objectMapper = objectMapper;
+    }
+
+    @EventListener
+    void batchJobCompleted(JobExecutionEvent event) {
+        var running = Map.of(//
+                "running", event.getJobExecution().getStatus().isRunning(),//
+                "finished", event.getJobExecution().getExitStatus().getExitCode() //
+        );//
+        System.out.println("jobExecutionEvent: [" + running + "]");
+        this.reportMap.clear();
     }
 
     private final RowMapper<YearReport> rowMapper = (rs, rowNum) -> {
         var year = rs.getInt("year");
-        if (!this.reportMap.containsKey(year)) this.reportMap.put(year, new YearReport(year, new ArrayList<>()));
+        if (!this.reportMap.containsKey(year))
+            this.reportMap.put(year, new YearReport(year, new ArrayList<>()));
         var yr = this.reportMap.get(year);
         yr.breakout().add(new YearPlatformSales(rs.getInt("year"), rs.getString("platform"), rs.getFloat("sales")));
         return yr;
@@ -128,20 +157,114 @@ class YearReportStepConfiguration {
     }
 
     //todo make sure we dedupe the data being written before it's been sent out.
-    //
     @Bean
-    Step yearReportStep() {
+    TaskletStep yearReportStep() {
         return new StepBuilder("yearReportStep", repository)
-                .<YearReport, YearReport>chunk(1000, this.transactionManager)
+                .<YearReport, String>chunk(1000, this.transactionManager)
                 .reader(yearPlatformSalesItemReader())
-                .writer(chunk -> {
+                .processor(new ItemProcessor<YearReport, String>() {
+                    @Override
+                    public String process(YearReport item) throws Exception {
+                        return objectMapper.writeValueAsString(item);
+                    }
+                })
+                .writer(chunkMessageChannelItemWriter()/*chunk -> {
                     var set = new LinkedHashSet<YearReport>();
                     set.addAll(chunk.getItems());
                     System.out.println("---------");
                     set.forEach(r -> System.out.println(r.toString()));
-                })
+                }*/)
                 .build();
     }
+
+    @Bean
+    IntegrationFlow replyFlow(ConnectionFactory connectionFactory) {
+        return IntegrationFlow
+                .from(Amqp.inboundAdapter(connectionFactory, "replies"))
+                .channel(replies())
+                .get();
+    }
+
+    @Bean
+    DirectChannel requests() {
+        return MessageChannels.direct().get();
+    }
+
+    @Bean
+    QueueChannel replies() {
+        return MessageChannels.queue().get();
+    }
+
+    @Bean
+    @StepScope
+    ChunkMessageChannelItemWriter<String> chunkMessageChannelItemWriter() {
+        var chunkMessageChannelItemWriter = new ChunkMessageChannelItemWriter<String>();
+        chunkMessageChannelItemWriter.setMessagingOperations(messagingTemplate());
+        chunkMessageChannelItemWriter.setReplyChannel(replies());
+        return chunkMessageChannelItemWriter;
+    }
+
+    @Bean
+    RemoteChunkHandlerFactoryBean<String> chunkHandler() {
+        var remoteChunkHandlerFactoryBean = new RemoteChunkHandlerFactoryBean<String>();
+        remoteChunkHandlerFactoryBean.setChunkWriter(chunkMessageChannelItemWriter());
+        remoteChunkHandlerFactoryBean.setStep(this.yearReportStep());
+        return remoteChunkHandlerFactoryBean;
+    }
+
+    @Bean
+    MessagingTemplate messagingTemplate() {
+        var template = new MessagingTemplate();
+        template.setDefaultChannel(requests());
+        template.setReceiveTimeout(2000);
+        return template;
+    }
+
+    @Bean
+    IntegrationFlow outboundFlow(AmqpTemplate amqpTemplate) {
+        return IntegrationFlow //
+                .from(requests())
+                .handle(Amqp.outboundAdapter(amqpTemplate).routingKey("requests"))
+                .get();
+    }
+}
+
+/**
+ * installs all the infrastructure for RabbitMQ
+ */
+@Configuration
+class RabbitConfiguration {
+
+    @Bean
+    org.springframework.amqp.core.Queue requestQueue() {
+        return new org.springframework.amqp.core.Queue("requests", false);
+    }
+
+    @Bean
+    org.springframework.amqp.core.Queue repliesQueue() {
+        return new Queue("replies", false);
+    }
+
+    @Bean
+    TopicExchange exchange() {
+        return new TopicExchange("remote-chunking-exchange");
+    }
+
+    @Bean
+    Binding repliesBinding(TopicExchange exchange) {
+        return BindingBuilder.bind(repliesQueue()).to(exchange).with("replies");
+    }
+
+    @Bean
+    Binding requestBinding(TopicExchange exchange) {
+        return BindingBuilder.bind(requestQueue()).to(exchange).with("requests");
+    }
+
+
+}
+
+record GameByYear(int rank, String name, String platform, int year, String genre, String publisher, float na,
+                  float eu, float jp, float other, float global) {
 }
 
 
@@ -209,10 +332,6 @@ class CsvToDbStepConfiguration {
         this.resource = resource;
         this.tx = txm;
         this.jdbc = template;
-    }
-
-    record GameByYear(int rank, String name, String platform, int year, String genre, String publisher, float na,
-                      float eu, float jp, float other, float global) {
     }
 
     @Bean
