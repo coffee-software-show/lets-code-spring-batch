@@ -2,10 +2,12 @@ package com.example.batch;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.joshlong.batch.remotechunking.worker.WorkerInboundChunkChannel;
+import com.joshlong.batch.remotechunking.worker.WorkerItemProcessor;
+import com.joshlong.batch.remotechunking.worker.WorkerItemWriter;
+import com.joshlong.batch.remotechunking.worker.WorkerOutboundChunkChannel;
 import org.springframework.amqp.core.AmqpTemplate;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
-import org.springframework.batch.core.step.item.SimpleChunkProcessor;
-import org.springframework.batch.integration.chunk.ChunkProcessorChunkHandler;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.boot.SpringApplication;
@@ -13,10 +15,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.integration.amqp.dsl.Amqp;
-import org.springframework.integration.annotation.ServiceActivator;
 import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.dsl.IntegrationFlow;
-import org.springframework.integration.dsl.MessageChannels;
+import org.springframework.messaging.MessageChannel;
 
 import java.util.Collection;
 
@@ -39,27 +40,20 @@ class WorkerConfiguration {
     }
 
     @Bean
-    DirectChannel requests() {
-        return MessageChannels.direct().get();
-    }
-
-    @Bean
-    DirectChannel replies() {
-        return MessageChannels.direct().get();
-    }
-
-    @Bean
-    IntegrationFlow messagesIn(ConnectionFactory connectionFactory) {
+    IntegrationFlow inbound(
+            @WorkerInboundChunkChannel DirectChannel requests,
+            ConnectionFactory connectionFactory) {
         return IntegrationFlow
                 .from(Amqp.inboundAdapter(connectionFactory, "requests"))
-                .channel(requests())
+                .channel(requests)
                 .get();
     }
 
     @Bean
-    IntegrationFlow outgoingReplies(AmqpTemplate template) {
+    IntegrationFlow outboundReplies(@WorkerOutboundChunkChannel MessageChannel replies,
+                                    AmqpTemplate template) {
         return IntegrationFlow //
-                .from(replies())
+                .from(replies)
                 .handle(Amqp.outboundAdapter(template).routingKey("replies"))
                 .get();
     }
@@ -79,26 +73,19 @@ class WorkerConfiguration {
     }
 
     @Bean
-    @ServiceActivator(inputChannel = "requests", outputChannel = "replies", sendTimeout = "10000")
-    ChunkProcessorChunkHandler<String> chunkProcessorChunkHandler() {
-
-        var itemProcessor = (ItemProcessor<String, YearReport>) (yearReportJson) -> {
+    @WorkerItemProcessor
+    ItemProcessor<String, YearReport> itemProcessor() {
+        return yearReportJson -> {
             System.out.println(">> processing YearReport JSON: " + yearReportJson);
             Thread.sleep(5);
             return deserializeYearReportJson(yearReportJson);
         };
-
-        var itemWriter = this.writer();
-
-        var chunkProcessorChunkHandler = new ChunkProcessorChunkHandler<String>();
-        chunkProcessorChunkHandler.setChunkProcessor(new SimpleChunkProcessor<>(itemProcessor, itemWriter));
-        return chunkProcessorChunkHandler;
     }
 
     @Bean
+    @WorkerItemWriter
     ItemWriter<YearReport> writer() {
-        return chunk -> chunk.getItems()
-                .forEach(WorkerConfiguration::doSomethingTimeIntensive);
+        return chunk -> chunk.getItems().forEach(WorkerConfiguration::doSomethingTimeIntensive);
     }
 }
 
@@ -107,8 +94,3 @@ record YearPlatformSales(int year, String platform, float sales) {
 
 record YearReport(int year, Collection<YearPlatformSales> breakout) {
 }
-
-record GameByYear(int rank, String name, String platform, int year, String genre, String publisher, float na,
-                  float eu, float jp, float other, float global) {
-}
-

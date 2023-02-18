@@ -2,7 +2,7 @@ plugins {
 	id 'java'
 	id 'org.springframework.boot' version '3.0.2'
 	id 'io.spring.dependency-management' version '1.1.0'
-	id 'org.graalvm.buildtools.native' version '0.9.18'
+//	id 'org.graalvm.buildtools.native' version '0.9.18'
 }
 
 group = 'com.example'
@@ -11,9 +11,11 @@ sourceCompatibility = '17'
 
 repositories {
 	mavenCentral()
+	mavenLocal()
 }
 
 dependencies {
+	implementation 'com.joshlong:batch-remotechunking-spring-boot-starter:1.2'
 	implementation 'org.springframework.batch:spring-batch-integration'
 	implementation 'org.springframework.integration:spring-integration-amqp'
 	implementation 'org.springframework.boot:spring-boot-starter-integration'

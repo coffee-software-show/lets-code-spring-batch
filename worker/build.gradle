@@ -11,9 +11,11 @@ sourceCompatibility = '17'
 
 repositories {
 	mavenCentral()
+	mavenLocal()
 }
 
 dependencies {
+	implementation 'com.joshlong:batch-remotechunking-spring-boot-starter:1.2'
 	implementation 'org.springframework.batch:spring-batch-integration'
 	implementation 'org.springframework.integration:spring-integration-amqp'
 	implementation 'org.springframework.boot:spring-boot-starter-integration'

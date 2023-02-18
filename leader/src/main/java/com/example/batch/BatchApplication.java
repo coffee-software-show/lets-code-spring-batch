@@ -1,6 +1,10 @@
 package com.example.batch;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.joshlong.batch.remotechunking.leader.LeaderChunkStep;
+import com.joshlong.batch.remotechunking.leader.LeaderInboundChunkChannel;
+import com.joshlong.batch.remotechunking.leader.LeaderItemWriter;
+import com.joshlong.batch.remotechunking.leader.LeaderOutboundChunkChannel;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -17,9 +21,8 @@ import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.core.step.tasklet.TaskletStep;
 import org.springframework.batch.integration.chunk.ChunkMessageChannelItemWriter;
-import org.springframework.batch.integration.chunk.RemoteChunkHandlerFactoryBean;
-import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
 import org.springframework.batch.item.database.builder.JdbcCursorItemReaderBuilder;
@@ -37,14 +40,12 @@ import org.springframework.context.event.EventListener;
 import org.springframework.core.DecoratingProxy;
 import org.springframework.core.io.Resource;
 import org.springframework.integration.amqp.dsl.Amqp;
-import org.springframework.integration.channel.DirectChannel;
-import org.springframework.integration.channel.QueueChannel;
-import org.springframework.integration.core.MessagingTemplate;
 import org.springframework.integration.dsl.IntegrationFlow;
-import org.springframework.integration.dsl.MessageChannels;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.PollableChannel;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -108,12 +109,16 @@ class YearReportStepConfiguration {
     private final JobRepository repository;
     private final PlatformTransactionManager transactionManager;
     private final ObjectMapper objectMapper;
+    private final ItemWriter<String> itemWriter;
 
-    YearReportStepConfiguration(JobRepository repository, DataSource dataSource, PlatformTransactionManager transactionManager, ObjectMapper objectMapper) {
+    YearReportStepConfiguration(JobRepository repository, DataSource dataSource,
+                                PlatformTransactionManager transactionManager, ObjectMapper objectMapper,
+                                @LeaderItemWriter ChunkMessageChannelItemWriter<String> itemWriter) {
         this.dataSource = dataSource;
         this.repository = repository;
         this.transactionManager = transactionManager;
         this.objectMapper = objectMapper;
+        this.itemWriter = itemWriter;
     }
 
     @EventListener
@@ -156,74 +161,30 @@ class YearReportStepConfiguration {
     }
 
     @Bean
+    @LeaderChunkStep
     TaskletStep yearReportStep() {
         return new StepBuilder("yearReportStep", repository)
                 .<YearReport, String>chunk(1000, this.transactionManager)
                 .reader(yearPlatformSalesItemReader())
-                .processor(objectMapper::writeValueAsString)
-                .writer(chunkMessageChannelItemWriter() )
+                .processor(this.objectMapper::writeValueAsString)
+                .writer( this.itemWriter)
                 .build();
     }
 
     @Bean
-    IntegrationFlow replyFlow(ConnectionFactory connectionFactory) {
+    IntegrationFlow replyFlow(@LeaderInboundChunkChannel PollableChannel replies,
+                              ConnectionFactory connectionFactory) {
         return IntegrationFlow
                 .from(Amqp.inboundAdapter(connectionFactory, "replies"))
-                .channel(replies())
+                .channel(replies)
                 .get();
     }
 
     @Bean
-    DirectChannel requests() {
-        return MessageChannels.direct().get();
-    }
-
-    @Bean
-    QueueChannel replies() {
-        return MessageChannels.queue().get();
-    }
-
-    static class DedupingChunkMessageChannelItemWriter<T> extends ChunkMessageChannelItemWriter<T> {
-
-        @Override
-        public void write(Chunk<? extends T> items) throws Exception {
-            var inputCollection = items.getItems();
-            var newList = new ArrayList<T>(new LinkedHashSet<>(inputCollection));
-            super.write(new Chunk<T>(newList));
-        }
-    }
-
-
-    @Bean
-    @StepScope
-    ChunkMessageChannelItemWriter<String> chunkMessageChannelItemWriter() {
-        var chunkMessageChannelItemWriter = new DedupingChunkMessageChannelItemWriter<String>();
-        chunkMessageChannelItemWriter.setMessagingOperations(messagingTemplate());
-        chunkMessageChannelItemWriter.setReplyChannel(replies());
-        return chunkMessageChannelItemWriter;
-    }
-
-    @Bean
-    RemoteChunkHandlerFactoryBean<String> chunkHandler() throws Exception {
-        var chunkMessageChannelItemWriterProxy = (chunkMessageChannelItemWriter());
-        var remoteChunkHandlerFactoryBean = new RemoteChunkHandlerFactoryBean<String>();
-        remoteChunkHandlerFactoryBean.setChunkWriter(chunkMessageChannelItemWriterProxy);
-        remoteChunkHandlerFactoryBean.setStep(this.yearReportStep());
-        return remoteChunkHandlerFactoryBean;
-    }
-
-    @Bean
-    MessagingTemplate messagingTemplate() {
-        var template = new MessagingTemplate();
-        template.setDefaultChannel(requests());
-        template.setReceiveTimeout(2000);
-        return template;
-    }
-
-    @Bean
-    IntegrationFlow outboundFlow(AmqpTemplate amqpTemplate) {
+    IntegrationFlow outboundFlow(@LeaderOutboundChunkChannel MessageChannel requests,
+                                 AmqpTemplate amqpTemplate) {
         return IntegrationFlow //
-                .from(requests())
+                .from(requests)
                 .handle(Amqp.outboundAdapter(amqpTemplate).routingKey("requests"))
                 .get();
     }
