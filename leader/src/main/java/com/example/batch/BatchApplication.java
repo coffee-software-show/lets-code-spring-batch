@@ -10,6 +10,7 @@ import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.aop.SpringProxy;
 import org.springframework.aop.framework.Advised;
+import org.springframework.aot.hint.MemberCategory;
 import org.springframework.aot.hint.RuntimeHints;
 import org.springframework.aot.hint.RuntimeHintsRegistrar;
 import org.springframework.batch.core.*;
@@ -63,6 +64,9 @@ public class BatchApplication {
         public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
             // todo https://github.com/spring-projects/spring-batch/issues/4294
             hints.proxies().registerJdkProxy(JobOperator.class, SpringProxy.class, Advised.class, DecoratingProxy.class);
+            Set.of(YearReport.class, GameByYear.class, YearPlatformSales.class)
+                .forEach(clzz -> hints.reflection().registerType(clzz, MemberCategory.values()));
+
         }
     }
 
@@ -87,17 +91,11 @@ public class BatchApplication {
                 .start(gameByYearStep).on(EMPTY_CSV_STATUS).to(errorStepConfiguration.errorStep())  //
                 .from(gameByYearStep).on("*").to(yearPlatformReportStepConfiguration.yearPlatformReportStep()) //
                 .next(yearReportStepConfiguration.yearReportStep())
-                .next(endStepConfiguration.end()) //
+                .next(endStepConfiguration.endStep()) //
                 .build() //
                 .build();
 
     }
-}
-
-record YearPlatformSales(int year, String platform, float sales) {
-}
-
-record YearReport(int year, Collection<YearPlatformSales> breakout) {
 }
 
 @Configuration
@@ -163,17 +161,18 @@ class YearReportStepConfiguration {
     @Bean
     @LeaderChunkStep
     TaskletStep yearReportStep() {
-        return new StepBuilder("yearReportStep", repository)
+        return new StepBuilder("yearReportStep", this.repository)
                 .<YearReport, String>chunk(1000, this.transactionManager)
                 .reader(yearPlatformSalesItemReader())
                 .processor(this.objectMapper::writeValueAsString)
-                .writer( this.itemWriter)
+                .writer(this.itemWriter)
                 .build();
     }
 
     @Bean
-    IntegrationFlow replyFlow(@LeaderInboundChunkChannel PollableChannel replies,
-                              ConnectionFactory connectionFactory) {
+    IntegrationFlow replyFlow(
+            @LeaderInboundChunkChannel PollableChannel replies,
+            ConnectionFactory connectionFactory) {
         return IntegrationFlow
                 .from(Amqp.inboundAdapter(connectionFactory, "replies"))
                 .channel(replies)
@@ -224,10 +223,6 @@ class RabbitConfiguration {
 
 }
 
-record GameByYear(int rank, String name, String platform, int year, String genre, String publisher, float na,
-                  float eu, float jp, float other, float global) {
-}
-
 
 @Configuration
 class EndStepConfiguration {
@@ -241,7 +236,7 @@ class EndStepConfiguration {
     }
 
     @Bean
-    Step end() {
+    Step endStep() {
         return new StepBuilder("end", repository)
                 .tasklet((contribution, chunkContext) -> {
                     System.out.println("the job is finished");
